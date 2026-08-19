@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Wallet, ArrowLeft, Plus, TrendingDown, CheckCircle2, Clock, Check } from 'lucide-react';
+import { Wallet, Plus, TrendingDown, CircleCheck as CheckCircle2, Clock, Check, CloudUpload as UploadCloud, CircleAlert as AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { Badge } from '@/components/ui/Badge';
 import {
   getSaldos, getPagosDePersona, getVentasDePersona, registrarPago, calcularEstadoPago,
+  importarDeudas, type FilaDeudaImport,
 } from '@/lib/db';
 import {
   moneda, fechaCorta, horaCorta, companiaLabel, companiaColor,
@@ -25,6 +26,11 @@ export function DeudasPage() {
 
   const [pagos, setPagos] = useState<Pago[]>([]);
   const [ventas, setVentas] = useState<VentaDetalle[]>([]);
+
+  // Import state
+  const [showImport, setShowImport] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [importResult, setImportResult] = useState<{ personasCreadas: number; ventasCreadas: number; errores: string[] } | null>(null);
 
   const cargarSaldos = async () => {
     try {
@@ -78,6 +84,43 @@ export function DeudasPage() {
     }
   };
 
+  // Parse Excel-like paste: apodo, chips, auxiliares, cargadores, total
+  const importPreview = useMemo(() => {
+    const lines = importText.split('\n').map((l) => l.trim()).filter(Boolean);
+    const filas: FilaDeudaImport[] = [];
+    for (const line of lines) {
+      // Support tab, comma, semicolon, or multiple spaces
+      const parts = line.split(/[\t,;]|\s{2,}/).map((p) => p.trim()).filter(Boolean);
+      if (parts.length < 2) continue;
+      const apodo = parts[0];
+      const chips = parseInt(parts[1]) || 0;
+      const auxiliares = parts.length > 2 ? parseInt(parts[2]) || 0 : 0;
+      const cargadores = parts.length > 3 ? parseInt(parts[3]) || 0 : 0;
+      const total = parts.length > 4 ? parseFloat(parts[4].replace(/[$,]/g, '')) || 0 : 0;
+      filas.push({ apodo, chips, auxiliares, cargadores, total });
+    }
+    return { total: lines.length, filas };
+  }, [importText]);
+
+  const handleImport = async () => {
+    if (importPreview.filas.length === 0) return;
+    setSaving(true);
+    setError(null);
+    setImportResult(null);
+    try {
+      const result = await importarDeudas(importPreview.filas);
+      setImportResult(result);
+      await cargarSaldos();
+      if (result.errores.length === 0) {
+        setImportText('');
+      }
+    } catch (e: any) {
+      setError(e.message || 'Error al importar.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const saldoPendientes = saldos.filter((s) => s.saldo > 0).length;
 
   return (
@@ -92,9 +135,14 @@ export function DeudasPage() {
             {saldoPendientes} personas con saldo · {saldos.length} en total
           </p>
         </div>
-        <div className="card-soft px-4 py-2.5">
-          <p className="text-xs text-slate-500 uppercase tracking-wider">Saldo total</p>
-          <p className="text-xl font-bold text-rose-400 font-mono">{moneda(totalDeuda)}</p>
+        <div className="flex items-center gap-2">
+          <Button variant="subtle" onClick={() => { setShowImport(true); setImportText(''); setImportResult(null); setError(null); }}>
+            <UploadCloud size={16} /> Importar deudas
+          </Button>
+          <div className="card-soft px-4 py-2.5">
+            <p className="text-xs text-slate-500 uppercase tracking-wider">Saldo total</p>
+            <p className="text-xl font-bold text-rose-400 font-mono">{moneda(totalDeuda)}</p>
+          </div>
         </div>
       </div>
 
@@ -104,7 +152,7 @@ export function DeudasPage() {
         <div className="card py-16 text-center">
           <CheckCircle2 size={36} className="mx-auto mb-3 text-mint-400/60" />
           <p className="text-slate-400">No hay deudas registradas.</p>
-          <p className="text-xs text-slate-600 mt-1">Las ventas a crédito aparecerán aquí.</p>
+          <p className="text-xs text-slate-600 mt-1">Las ventas a crédito aparecerán aquí. Puedes importar deudas existentes con el botón "Importar deudas".</p>
         </div>
       ) : (
         <div className="card overflow-hidden">
@@ -261,6 +309,66 @@ export function DeudasPage() {
             </div>
           </div>
         )}
+      </Modal>
+
+      {/* IMPORT DEUDAS MODAL */}
+      <Modal open={showImport} onClose={() => setShowImport(false)} title="Importar deudas desde Excel" size="lg">
+        <div className="space-y-4">
+          <p className="text-sm text-slate-400">
+            Pega tu lista de deudas con el formato: <span className="text-slate-200">Apodo, Chips, Auxiliares, Cargadores, Total</span>.
+            <br />Puedes copiar y pegar directamente desde Excel (columnas separadas por tabulador).
+            Las personas que no existan se crearán automáticamente.
+          </p>
+          <div className="card-soft p-3 text-xs text-slate-500">
+            <p className="font-semibold text-slate-400 mb-1">Ejemplo:</p>
+            <pre className="font-mono text-slate-400">{'WERO\t2\t1\t0\t370\nRECIO\t5\t0\t2\t850\nARG\t3\t0\t0\t330'}</pre>
+          </div>
+          <textarea
+            value={importText}
+            onChange={(e) => { setImportText(e.target.value); setImportResult(null); }}
+            placeholder={'WERO\t2\t1\t0\t370\nRECIO\t5\t0\t2\t850'}
+            rows={12}
+            autoFocus
+            spellCheck={false}
+            className="input-base font-mono text-sm resize-y"
+          />
+          {importText.trim() && (
+            <div className="flex items-center gap-4 text-xs">
+              <span className="text-slate-400">
+                <span className="font-semibold text-slate-200">{importPreview.total}</span> líneas
+              </span>
+              <span className="text-slate-400">
+                <span className="font-semibold text-brand-300">{importPreview.filas.length}</span> filas válidas
+              </span>
+            </div>
+          )}
+          {importResult && (
+            <div className="card-soft p-3 space-y-1.5">
+              <div className="flex items-center gap-2 text-sm text-mint-300">
+                <Check size={15} /> {importResult.personasCreadas} persona{importResult.personasCreadas !== 1 ? 's' : ''} creada{importResult.personasCreadas !== 1 ? 's' : ''} · {importResult.ventasCreadas} venta{importResult.ventasCreadas !== 1 ? 's' : ''} registrada{importResult.ventasCreadas !== 1 ? 's' : ''}
+              </div>
+              {importResult.errores.length > 0 && (
+                <div className="flex items-start gap-2 text-xs text-amber-400">
+                  <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                  <span>
+                    {importResult.errores.length} error{importResult.errores.length !== 1 ? 'es' : ''}: {importResult.errores.slice(0, 5).join(', ')}
+                    {importResult.errores.length > 5 && ` … y ${importResult.errores.length - 5} más`}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+          {error && <p className="text-xs text-rose-400">{error}</p>}
+          <div className="flex gap-2 justify-end pt-1">
+            <Button variant="subtle" onClick={() => setShowImport(false)}>Cerrar</Button>
+            <Button
+              onClick={handleImport}
+              disabled={saving || importPreview.filas.length === 0}
+            >
+              <UploadCloud size={16} /> {saving ? 'Procesando…' : 'Importar deudas'}
+            </Button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

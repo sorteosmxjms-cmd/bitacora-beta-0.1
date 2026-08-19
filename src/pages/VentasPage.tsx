@@ -1,13 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Save, Zap, ShoppingCart, Cpu, Headphones, Smartphone, Battery, RotateCcw, Clock, Trash2, Pencil, X } from 'lucide-react';
+import {
+  Save, Zap, ShoppingCart, Cpu, RotateCcw, Clock, Trash2, Pencil,
+  Plus, FileDown, ChevronDown, Package,
+} from 'lucide-react';
 import { useApp } from '@/store/AppContext';
 import { PersonAutocomplete, type PersonAutocompleteRef } from '@/components/PersonAutocomplete';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
-import { registrarChip, registrarVentaProducto, getVentasHoy, eliminarVenta, actualizarVentaPersona } from '@/lib/db';
-import { moneda, companiaLabel, companiaColor, horaCorta, estadoChipLabel, estadoChipColor } from '@/lib/format';
-import type { Compania, Persona, Producto, VentaDetalle } from '@/lib/types';
+import { Input } from '@/components/ui/Input';
+import {
+  registrarChip, registrarVentaProducto, getVentasHoy, eliminarVenta,
+  actualizarVentaPersona, crearProducto,
+} from '@/lib/db';
+import { moneda, companiaLabel, companiaColor, horaCorta } from '@/lib/format';
+import { buildResumen } from '@/lib/reporte';
+import { generatePDF } from '@/lib/pdf';
+import type { Compania, Persona, Producto, VentaDetalle, CategoriaProducto } from '@/lib/types';
 
 type Modo = 'chip' | 'producto';
 
@@ -17,36 +26,36 @@ const COMPANIAS: { key: Compania; label: string; hotkey: string }[] = [
   { key: 'unefon', label: 'Unefon', hotkey: 'U' },
 ];
 
-const PRODUCTO_ICONOS: Record<string, typeof Cpu> = {
-  'Cargador': Battery,
-  'Auriculares': Headphones,
-  'Teléfono básico': Smartphone,
-  'Teléfono Android': Smartphone,
-};
-
 export function VentasPage() {
-  const { personas, productos, addPersonaLocal } = useApp();
+  const { personas, productos, addPersonaLocal, refreshProductos } = useApp();
 
   const chipProductos = useMemo(() => productos.filter((p) => p.categoria === 'chip'), [productos]);
   const otrosProductos = useMemo(() => productos.filter((p) => p.categoria !== 'chip'), [productos]);
 
   const [modo, setModo] = useState<Modo>('chip');
 
-  // Shared state — always separate usa/paga
+  // Shared state
   const [personaUsa, setPersonaUsa] = useState<Persona | null>(null);
   const [personaPaga, setPersonaPaga] = useState<Persona | null>(null);
 
   // Chip state
   const [numero, setNumero] = useState('');
   const [compania, setCompania] = useState<Compania>('telcel');
+  const [companiaOpen, setCompaniaOpen] = useState(false);
   const [ultimos4, setUltimos4] = useState('');
   const [chipProducto, setChipProducto] = useState<Producto | null>(null);
   const [chipPrecio, setChipPrecio] = useState(110);
 
   // Producto state
   const [productoSel, setProductoSel] = useState<Producto | null>(null);
+  const [productoDropdownOpen, setProductoDropdownOpen] = useState(false);
   const [cantidad, setCantidad] = useState(1);
   const [prodPrecio, setProdPrecio] = useState(0);
+  const [showNuevoProd, setShowNuevoProd] = useState(false);
+  const [nuevoProdNombre, setNuevoProdNombre] = useState('');
+  const [nuevoProdCategoria, setNuevoProdCategoria] = useState<CategoriaProducto>('accesorio');
+  const [nuevoProdPrecio, setNuevoProdPrecio] = useState('');
+  const [savingProd, setSavingProd] = useState(false);
 
   // UI
   const [saving, setSaving] = useState(false);
@@ -56,18 +65,19 @@ export function VentasPage() {
   const [editUsa, setEditUsa] = useState<Persona | null>(null);
   const [editPaga, setEditPaga] = useState<Persona | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<VentaDetalle | null>(null);
+  const [generandoPDF, setGenerandoPDF] = useState(false);
 
-  // Refs for keyboard navigation
+  // Refs
   const numeroRef = useRef<HTMLInputElement>(null);
   const ultimos4Ref = useRef<HTMLInputElement>(null);
   const companiaRef = useRef<HTMLDivElement>(null);
   const cantidadRef = useRef<HTMLInputElement>(null);
-  const productoGridRef = useRef<HTMLDivElement>(null);
+  const productoDropdownRef = useRef<HTMLDivElement>(null);
   const usaRef = useRef<PersonAutocompleteRef>(null);
   const pagaRef = useRef<PersonAutocompleteRef>(null);
   const guardarBtnRef = useRef<HTMLButtonElement>(null);
 
-  // Initialize chip product & precio when productos load
+  // Initialize chip product & precio
   useEffect(() => {
     if (chipProductos.length && !chipProducto) {
       const telcel = chipProductos.find((p) => p.nombre === 'Chip Telcel') ?? chipProductos[0];
@@ -76,11 +86,12 @@ export function VentasPage() {
     }
   }, [chipProductos, chipProducto]);
 
+  // Initialize producto selection — use first accesorio
   useEffect(() => {
     if (otrosProductos.length && !productoSel) {
-      const cargador = otrosProductos.find((p) => p.nombre === 'Cargador') ?? otrosProductos[0];
-      setProductoSel(cargador);
-      setProdPrecio(Number(cargador.precio));
+      const first = otrosProductos.find((p) => p.activo) ?? otrosProductos[0];
+      setProductoSel(first);
+      setProdPrecio(Number(first.precio));
     }
   }, [otrosProductos, productoSel]);
 
@@ -93,7 +104,6 @@ export function VentasPage() {
 
   useEffect(() => { cargarHoy(); }, [cargarHoy]);
 
-  // Focus first field when mode changes
   useEffect(() => {
     const t = setTimeout(() => {
       if (modo === 'chip') numeroRef.current?.focus();
@@ -101,6 +111,16 @@ export function VentasPage() {
     }, 30);
     return () => clearTimeout(t);
   }, [modo]);
+
+  // Close dropdowns on outside click
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (companiaRef.current && !companiaRef.current.contains(e.target as Node)) setCompaniaOpen(false);
+      if (productoDropdownRef.current && !productoDropdownRef.current.contains(e.target as Node)) setProductoDropdownOpen(false);
+    };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, []);
 
   const showToast = (kind: 'ok' | 'err', msg: string) => {
     setToast({ kind, msg });
@@ -186,13 +206,34 @@ export function VentasPage() {
     }
   };
 
-  // --- Keyboard shortcuts for company selection ---
+  const handleCrearProducto = async () => {
+    const nombre = nuevoProdNombre.trim();
+    if (!nombre) return;
+    setSavingProd(true);
+    try {
+      const p = await crearProducto(nombre, nuevoProdCategoria, Number(nuevoProdPrecio) || 0);
+      await refreshProductos();
+      setProductoSel(p);
+      setProdPrecio(Number(p.precio));
+      setShowNuevoProd(false);
+      setNuevoProdNombre('');
+      setNuevoProdPrecio('');
+      showToast('ok', `Producto "${p.nombre}" creado`);
+    } catch (e: any) {
+      showToast('err', e.message || 'Error al crear producto.');
+    } finally {
+      setSavingProd(false);
+    }
+  };
+
+  // Keyboard for company
   const onCompaniaKeyDown = (e: React.KeyboardEvent) => {
     const key = e.key.toLowerCase();
     const match = COMPANIAS.find((c) => c.hotkey.toLowerCase() === key);
     if (match) {
       e.preventDefault();
       setCompania(match.key);
+      setCompaniaOpen(false);
       setTimeout(() => ultimos4Ref.current?.focus(), 10);
       return;
     }
@@ -202,26 +243,6 @@ export function VentasPage() {
     }
   };
 
-  // --- Keyboard shortcuts for product selection ---
-  const onProductoKeyDown = (e: React.KeyboardEvent) => {
-    if (!otrosProductos.length) return;
-    const key = e.key.toLowerCase();
-    const matches = otrosProductos.filter((p) => p.activo && p.nombre.toLowerCase().startsWith(key));
-    if (matches.length > 0) {
-      e.preventDefault();
-      const target = matches[0];
-      setProductoSel(target);
-      setProdPrecio(Number(target.precio));
-      setTimeout(() => usaRef.current?.focus(), 10);
-      return;
-    }
-    if (e.key === 'Enter' || e.key === 'Tab') {
-      e.preventDefault();
-      usaRef.current?.focus();
-    }
-  };
-
-  // Number field: Enter jumps to company
   const onNumeroKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === 'Tab') {
       e.preventDefault();
@@ -229,7 +250,6 @@ export function VentasPage() {
     }
   };
 
-  // Últimos 4: Enter jumps to quien usa
   const onUltimos4KeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === 'Tab') {
       e.preventDefault();
@@ -237,15 +257,14 @@ export function VentasPage() {
     }
   };
 
-  // Cantidad: Enter jumps to product selector
   const onCantidadKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === 'Tab') {
       e.preventDefault();
-      productoGridRef.current?.focus();
+      setProductoDropdownOpen(true);
+      productoDropdownRef.current?.focus();
     }
   };
 
-  // Enter on save button triggers save
   const onGuardarKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -254,7 +273,6 @@ export function VentasPage() {
     }
   };
 
-  // --- Edit / Delete handlers ---
   const abrirEditar = (v: VentaDetalle) => {
     setEditando(v);
     setEditUsa(v.persona_usa ?? null);
@@ -294,23 +312,39 @@ export function VentasPage() {
     }
   };
 
-  // --- Per-person product breakdown for today ---
-  const resumenPorPersona = useMemo(() => {
-    const map = new Map<string, { apodo: string; chips: number; cargadores: number; auriculares: number; telefonos: number; total: number }>();
-    for (const v of hoyVentas) {
-      const pid = v.persona_paga?.id;
-      if (!pid) continue;
-      const apodo = v.persona_paga?.apodo ?? '?';
-      const entry = map.get(pid) ?? { apodo, chips: 0, cargadores: 0, auriculares: 0, telefonos: 0, total: 0 };
-      if (v.chip) entry.chips++;
-      if (v.producto?.categoria === 'accesorio' && v.producto?.nombre === 'Cargador') entry.cargadores += v.cantidad;
-      if (v.producto?.categoria === 'accesorio' && v.producto?.nombre === 'Auriculares') entry.auriculares += v.cantidad;
-      if (v.producto?.categoria === 'telefono') entry.telefonos += v.cantidad;
-      entry.total += Number(v.total);
-      map.set(pid, entry);
+  const cerrarDia = async () => {
+    if (hoyVentas.length === 0) {
+      showToast('err', 'No hay ventas hoy para reportar.');
+      return;
     }
-    return Array.from(map.values()).sort((a, b) => b.total - a.total);
-  }, [hoyVentas]);
+    setGenerandoPDF(true);
+    try {
+      const { porPersona, totales } = buildResumen(hoyVentas);
+      const today = new Date();
+      const fechaKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      await generatePDF(fechaKey, porPersona, totales);
+      showToast('ok', 'Reporte del día descargado');
+    } catch (e: any) {
+      showToast('err', e.message || 'Error al generar reporte.');
+    } finally {
+      setGenerandoPDF(false);
+    }
+  };
+
+  const { porPersona, totales } = useMemo(() => buildResumen(hoyVentas), [hoyVentas]);
+
+  const seleccionarCompania = (c: Compania) => {
+    setCompania(c);
+    setCompaniaOpen(false);
+    setTimeout(() => ultimos4Ref.current?.focus(), 10);
+  };
+
+  const seleccionarProducto = (p: Producto) => {
+    setProductoSel(p);
+    setProdPrecio(Number(p.precio));
+    setProductoDropdownOpen(false);
+    setTimeout(() => usaRef.current?.focus(), 10);
+  };
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-6">
@@ -323,21 +357,26 @@ export function VentasPage() {
           </h2>
           <p className="text-sm text-slate-500 mt-0.5">Captura rápida — {hoyVentas.length} ventas hoy</p>
         </div>
-        <div className="flex gap-1 p-1 bg-ink-900/60 border border-ink-700/50 rounded-xl">
-          <button
-            onClick={() => setModo('chip')}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2
-              ${modo === 'chip' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
-          >
-            <Cpu size={16} /> Chip
-          </button>
-          <button
-            onClick={() => setModo('producto')}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2
-              ${modo === 'producto' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
-          >
-            <ShoppingCart size={16} /> Producto
-          </button>
+        <div className="flex items-center gap-2">
+          <Button variant="success" size="sm" onClick={cerrarDia} disabled={generandoPDF || hoyVentas.length === 0}>
+            <FileDown size={16} /> {generandoPDF ? 'Generando…' : 'Cerrar día'}
+          </Button>
+          <div className="flex gap-1 p-1 bg-ink-900/60 border border-ink-700/50 rounded-xl">
+            <button
+              onClick={() => setModo('chip')}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2
+                ${modo === 'chip' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              <Cpu size={16} /> Chip
+            </button>
+            <button
+              onClick={() => setModo('producto')}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2
+                ${modo === 'producto' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              <ShoppingCart size={16} /> Producto
+            </button>
+          </div>
         </div>
       </div>
 
@@ -355,7 +394,7 @@ export function VentasPage() {
       {/* CHIP FORM */}
       {modo === 'chip' && (
         <div className="card p-5 animate-fade-in">
-          {/* Number + Company side by side */}
+          {/* Number + Company */}
           <div className="grid grid-cols-3 gap-3 mb-4">
             <div className="col-span-2">
               <label className="label-base">Número (10 dígitos)</label>
@@ -373,13 +412,34 @@ export function VentasPage() {
               <p className="mt-1 text-xs text-slate-500">{numero.length}/10 dígitos</p>
             </div>
             <div>
-              <label className="label-base">Compañía <span className="text-slate-600 normal-case tracking-normal text-[10px]">T/A/U</span></label>
-              <div ref={companiaRef} className="grid grid-cols-1 gap-1 h-[42px]" tabIndex={0} onKeyDown={onCompaniaKeyDown}>
-                <div className={`px-2 py-2 rounded-lg text-sm font-semibold border transition-all flex items-center justify-center gap-1.5 ${companiaColor(compania)}`}>
-                  {companiaLabel(compania)}
-                </div>
+              <label className="label-base">Compañía <span className="text-slate-600 normal-case tracking-normal text-[10px]">T/A/U o clic</span></label>
+              <div ref={companiaRef} className="relative" tabIndex={0} onKeyDown={onCompaniaKeyDown}>
+                <button
+                  type="button"
+                  onClick={() => setCompaniaOpen((v) => !v)}
+                  className={`w-full px-2 py-2 rounded-lg text-sm font-semibold border transition-all flex items-center justify-between gap-1.5 ${companiaColor(compania)}`}
+                >
+                  <span>{companiaLabel(compania)}</span>
+                  <ChevronDown size={14} className="opacity-60" />
+                </button>
+                {companiaOpen && (
+                  <div className="absolute z-40 mt-1 w-full card p-1 animate-pop">
+                    {COMPANIAS.map((c) => (
+                      <button
+                        key={c.key}
+                        type="button"
+                        onClick={() => seleccionarCompania(c.key)}
+                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium text-left transition flex items-center justify-between
+                          ${compania === c.key ? 'bg-brand-600/20 text-white' : 'text-slate-300 hover:bg-ink-800'}`}
+                      >
+                        <span>{c.label}</span>
+                        <kbd className="text-[10px] font-mono px-1 rounded bg-ink-700/50">{c.hotkey}</kbd>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
-              <p className="mt-1 text-xs text-slate-600">T/A/U</p>
+              <p className="mt-1 text-xs text-slate-600">T/A/U o clic</p>
             </div>
           </div>
 
@@ -400,7 +460,7 @@ export function VentasPage() {
             <p className="mt-1 text-xs text-slate-500">{ultimos4.length}/4 dígitos</p>
           </div>
 
-          {/* Quién lo usa + Quién lo paga — always separate */}
+          {/* Quién usa / paga */}
           <div className="grid grid-cols-2 gap-3 mb-4">
             <PersonAutocomplete
               ref={usaRef}
@@ -467,28 +527,49 @@ export function VentasPage() {
       {/* PRODUCTO FORM */}
       {modo === 'producto' && (
         <div className="card p-5 animate-fade-in">
+          {/* Dropdown selector */}
           <div className="mb-4">
-            <span className="label-base">Producto <span className="text-slate-600 normal-case tracking-normal">(C / A / primera letra)</span></span>
-            <div ref={productoGridRef} className="grid grid-cols-2 gap-2" tabIndex={0} onKeyDown={onProductoKeyDown}>
-              {otrosProductos.filter((p) => p.activo).map((p) => {
-                const Icon = PRODUCTO_ICONOS[p.nombre] ?? ShoppingCart;
-                const active = productoSel?.id === p.id;
-                const hk = p.nombre.charAt(0).toUpperCase();
-                return (
-                  <button
-                    key={p.id}
-                    onClick={() => { setProductoSel(p); setProdPrecio(Number(p.precio)); usaRef.current?.focus(); }}
-                    className={`flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium border transition text-left
-                      ${active
-                        ? 'bg-brand-600/15 border-brand-500/40 text-white'
-                        : 'bg-ink-850 border-ink-700 text-slate-400 hover:text-slate-200 hover:border-ink-600'}`}
-                  >
-                    <Icon size={16} className={active ? 'text-brand-300' : 'text-slate-500'} />
-                    <span className="flex-1">{p.nombre}</span>
-                    <kbd className={`text-[10px] font-mono px-1 rounded ${active ? 'bg-white/10' : 'bg-ink-700/50'}`}>{hk}</kbd>
-                  </button>
-                );
-              })}
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="label-base mb-0">Producto</span>
+              <button
+                onClick={() => { setShowNuevoProd(true); setNuevoProdNombre(''); setNuevoProdPrecio(''); }}
+                className="text-xs text-brand-400 hover:text-brand-300 font-medium flex items-center gap-1"
+              >
+                <Plus size={12} /> Nuevo producto
+              </button>
+            </div>
+            <div ref={productoDropdownRef} className="relative">
+              <button
+                type="button"
+                onClick={() => setProductoDropdownOpen((v) => !v)}
+                className="w-full input-base flex items-center justify-between text-left"
+              >
+                <span className={productoSel ? 'text-slate-100' : 'text-slate-500'}>
+                  {productoSel?.nombre ?? 'Selecciona un producto…'}
+                </span>
+                <ChevronDown size={16} className="text-slate-500 shrink-0" />
+              </button>
+              {productoDropdownOpen && (
+                <div className="absolute z-40 mt-1 w-full card p-1.5 animate-pop max-h-64 overflow-y-auto">
+                  {otrosProductos.filter((p) => p.activo).map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => seleccionarProducto(p)}
+                      className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium text-left transition
+                        ${productoSel?.id === p.id ? 'bg-brand-600/20 text-white' : 'text-slate-300 hover:bg-ink-800'}`}
+                    >
+                      <Package size={15} className={productoSel?.id === p.id ? 'text-brand-300' : 'text-slate-500'} />
+                      <span className="flex-1">{p.nombre}</span>
+                      <span className="text-xs text-slate-500 capitalize">{p.categoria}</span>
+                      <span className="font-mono text-xs text-mint-300">{moneda(Number(p.precio))}</span>
+                    </button>
+                  ))}
+                  {otrosProductos.filter((p) => p.activo).length === 0 && (
+                    <p className="px-3 py-3 text-sm text-slate-500 text-center">No hay productos. Crea uno nuevo.</p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -525,7 +606,7 @@ export function VentasPage() {
             </div>
           </div>
 
-          {/* Quién lo usa + Quién lo paga — always separate */}
+          {/* Quién usa / paga */}
           <div className="grid grid-cols-2 gap-3 mb-4">
             <PersonAutocomplete
               ref={usaRef}
@@ -559,58 +640,17 @@ export function VentasPage() {
         </div>
       )}
 
-      {/* Quick tip */}
+      {/* Quick tips */}
       <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">
         <span className="flex items-center gap-1">
           <kbd className="px-1.5 py-0.5 rounded bg-ink-800 border border-ink-700 font-mono text-[10px]">Enter</kbd> avanza al siguiente campo
         </span>
         <span className="flex items-center gap-1">
-          <kbd className="px-1.5 py-0.5 rounded bg-ink-800 border border-ink-700 font-mono text-[10px]">T/A/U</kbd> selecciona compañía
-        </span>
-        <span className="flex items-center gap-1">
-          <kbd className="px-1.5 py-0.5 rounded bg-ink-800 border border-ink-700 font-mono text-[10px]">Enter</kbd> en "quién paga" guarda
+          <kbd className="px-1.5 py-0.5 rounded bg-ink-800 border border-ink-700 font-mono text-[10px]">T/A/U</kbd> o clic para compañía
         </span>
       </div>
 
-      {/* Per-person summary */}
-      {resumenPorPersona.length > 0 && (
-        <div className="mt-6">
-          <h3 className="text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
-            <Clock size={15} className="text-brand-400" />
-            Resumen del día por persona
-          </h3>
-          <div className="card overflow-hidden">
-            <div className="grid grid-cols-12 gap-2 px-4 py-2.5 bg-ink-850/60 border-b border-ink-700/40 text-xs font-semibold uppercase tracking-wider text-slate-500">
-              <div className="col-span-3">Persona</div>
-              <div className="col-span-1 text-center">Chips</div>
-              <div className="col-span-2 text-center">Carg.</div>
-              <div className="col-span-2 text-center">Aux.</div>
-              <div className="col-span-2 text-center">Tel.</div>
-              <div className="col-span-2 text-right">Total</div>
-            </div>
-            <div className="divide-y divide-ink-700/40">
-              {resumenPorPersona.map((p) => (
-                <div key={p.apodo} className="grid grid-cols-12 gap-2 px-4 py-2.5 items-center hover:bg-ink-850/40 transition">
-                  <div className="col-span-3 font-medium uppercase tracking-wide text-slate-100 truncate">{p.apodo}</div>
-                  <div className="col-span-1 text-center font-mono text-brand-300">{p.chips || '—'}</div>
-                  <div className="col-span-2 text-center font-mono text-slate-400">{p.cargadores || '—'}</div>
-                  <div className="col-span-2 text-center font-mono text-slate-400">{p.auriculares || '—'}</div>
-                  <div className="col-span-2 text-center font-mono text-slate-400">{p.telefonos || '—'}</div>
-                  <div className="col-span-2 text-right font-mono font-semibold text-mint-300">{moneda(p.total)}</div>
-                </div>
-              ))}
-            </div>
-            <div className="grid grid-cols-12 gap-2 px-4 py-2.5 bg-ink-850/60 border-t border-ink-700/40 items-center">
-              <div className="col-span-9 text-xs font-semibold uppercase tracking-wider text-slate-500">Total del día</div>
-              <div className="col-span-3 text-right font-mono font-bold text-mint-300">
-                {moneda(resumenPorPersona.reduce((a, p) => a + p.total, 0))}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Today's sales table */}
+      {/* Today's sales table — FIRST (top) */}
       <div className="mt-6">
         <h3 className="text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
           <Clock size={15} className="text-brand-400" />
@@ -677,6 +717,44 @@ export function VentasPage() {
           )}
         </div>
       </div>
+
+      {/* Per-person summary — BELOW today's sales */}
+      {porPersona.length > 0 && (
+        <div className="mt-6">
+          <h3 className="text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
+            <Clock size={15} className="text-brand-400" />
+            Resumen del día por persona
+          </h3>
+          <div className="card overflow-hidden">
+            <div className="grid grid-cols-12 gap-2 px-4 py-2.5 bg-ink-850/60 border-b border-ink-700/40 text-xs font-semibold uppercase tracking-wider text-slate-500">
+              <div className="col-span-3">Persona</div>
+              <div className="col-span-1 text-center">Chips</div>
+              <div className="col-span-2 text-center">Carg.</div>
+              <div className="col-span-2 text-center">Aux.</div>
+              <div className="col-span-2 text-center">Tel.</div>
+              <div className="col-span-2 text-right">Total</div>
+            </div>
+            <div className="divide-y divide-ink-700/40">
+              {porPersona.map((p) => (
+                <div key={p.apodo} className="grid grid-cols-12 gap-2 px-4 py-2.5 items-center hover:bg-ink-850/40 transition">
+                  <div className="col-span-3 font-medium uppercase tracking-wide text-slate-100 truncate">{p.apodo}</div>
+                  <div className="col-span-1 text-center font-mono text-brand-300">{p.chips || '—'}</div>
+                  <div className="col-span-2 text-center font-mono text-slate-400">{p.cargadores || '—'}</div>
+                  <div className="col-span-2 text-center font-mono text-slate-400">{p.auriculares || '—'}</div>
+                  <div className="col-span-2 text-center font-mono text-slate-400">{p.telefonos || '—'}</div>
+                  <div className="col-span-2 text-right font-mono font-semibold text-mint-300">{moneda(p.total)}</div>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-12 gap-2 px-4 py-2.5 bg-ink-850/60 border-t border-ink-700/40 items-center">
+              <div className="col-span-9 text-xs font-semibold uppercase tracking-wider text-slate-500">Total del día</div>
+              <div className="col-span-3 text-right font-mono font-bold text-mint-300">
+                {moneda(totales.total)}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Edit modal */}
       <Modal
@@ -750,6 +828,49 @@ export function VentasPage() {
             </div>
           </div>
         )}
+      </Modal>
+
+      {/* New product modal */}
+      <Modal
+        open={showNuevoProd}
+        onClose={() => setShowNuevoProd(false)}
+        title="Nuevo producto"
+        size="sm"
+      >
+        <div className="space-y-3">
+          <Input
+            label="Nombre"
+            value={nuevoProdNombre}
+            onChange={(e) => setNuevoProdNombre(e.target.value)}
+            placeholder="Ej. Funda, Mica, Batería…"
+            autoFocus
+          />
+          <div>
+            <label className="label-base">Categoría</label>
+            <select
+              value={nuevoProdCategoria}
+              onChange={(e) => setNuevoProdCategoria(e.target.value as CategoriaProducto)}
+              className="input-base"
+            >
+              <option value="accesorio">Accesorio</option>
+              <option value="telefono">Teléfono</option>
+            </select>
+          </div>
+          <Input
+            label="Precio"
+            type="number"
+            value={nuevoProdPrecio}
+            onChange={(e) => setNuevoProdPrecio(e.target.value)}
+            placeholder="0"
+            className="font-mono"
+          />
+          <div className="flex gap-2 justify-end pt-1">
+            <Button variant="subtle" onClick={() => setShowNuevoProd(false)}>Cancelar</Button>
+            <Button onClick={handleCrearProducto} disabled={savingProd || !nuevoProdNombre.trim()}>
+              <Plus size={16} /> {savingProd ? 'Guardando…' : 'Crear producto'}
+            </Button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

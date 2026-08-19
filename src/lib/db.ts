@@ -1,7 +1,7 @@
 import { supabase } from './supabase';
 import type {
   Persona, Producto, Venta, Chip, Pago, VentaDetalle, SaldoPersona,
-  Compania, EstadoChip, EstadoPago,
+  Compania, EstadoChip, EstadoPago, CategoriaProducto,
 } from './types';
 
 /**
@@ -85,6 +85,13 @@ export async function getProductos(): Promise<Producto[]> {
 export async function actualizarPrecioProducto(id: string, precio: number): Promise<Producto> {
   const { data, error } = await supabase
     .from('productos').update({ precio }).eq('id', id).select().single();
+  if (error) throw error;
+  return data as Producto;
+}
+
+export async function crearProducto(nombre: string, categoria: CategoriaProducto, precio: number): Promise<Producto> {
+  const { data, error } = await supabase
+    .from('productos').insert({ nombre: nombre.trim(), categoria, precio }).select().single();
   if (error) throw error;
   return data as Producto;
 }
@@ -333,4 +340,122 @@ export function calcularEstadoPago(totalVenta: number, totalPagos: number): Esta
   if (totalPagos <= 0) return 'pendiente';
   if (totalPagos >= totalVenta) return 'liquidado';
   return 'abonado';
+}
+
+/* ---------------- Importación masiva de deudas ---------------- */
+
+export interface FilaDeudaImport {
+  apodo: string;
+  chips: number;
+  auxiliares: number;
+  cargadores: number;
+  total: number;
+}
+
+/**
+ * Import debts from a pasted Excel-like text. For each row:
+ * - Create the persona if it doesn't exist.
+ * - Create placeholder productos (Chip importado, Cargador importado, Auriculares importado) if needed.
+ * - Create a venta per item with the appropriate quantity and unit price derived from the total.
+ * - Create a single "venta de saldo inicial" that represents the remaining debt.
+ * The total is treated as the outstanding balance (deuda), not total vendido.
+ */
+export async function importarDeudas(filas: FilaDeudaImport[]): Promise<{
+  personasCreadas: number;
+  ventasCreadas: number;
+  errores: string[];
+}> {
+  let personasCreadas = 0;
+  let ventasCreadas = 0;
+  const errores: string[] = [];
+
+  // Ensure placeholder products exist
+  const { data: prods } = await supabase.from('productos').select('*');
+  const prodMap = new Map<string, Producto>();
+  for (const p of (prods as Producto[]) ?? []) {
+    prodMap.set(p.nombre, p);
+  }
+
+  const ensureProducto = async (nombre: string, categoria: CategoriaProducto): Promise<Producto> => {
+    if (prodMap.has(nombre)) return prodMap.get(nombre)!;
+    const created = await crearProducto(nombre, categoria, 0);
+    prodMap.set(nombre, created);
+    return created;
+  };
+
+  const prodChip = await ensureProducto('Chip (importado)', 'chip');
+  const prodCarg = await ensureProducto('Cargador (importado)', 'accesorio');
+  const prodAux = await ensureProducto('Auriculares (importado)', 'accesorio');
+
+  for (const fila of filas) {
+    try {
+      const apodo = fila.apodo.trim().toUpperCase();
+      if (!apodo) continue;
+
+      // Find or create persona
+      const { data: existing } = await supabase
+        .from('personas').select('*').eq('apodo', apodo).maybeSingle();
+      let persona = existing as Persona | null;
+      if (!persona) {
+        persona = await crearPersona(apodo);
+        personasCreadas++;
+      }
+
+      const itemCount = fila.chips + fila.cargadores + fila.auxiliares;
+      if (itemCount === 0 && fila.total > 0) {
+        // No items but has debt — create a single saldoInicial venta
+        await supabase.from('ventas').insert({
+          producto_id: prodChip.id,
+          persona_paga_id: persona.id,
+          cantidad: 1,
+          precio_unitario: fila.total,
+          total: fila.total,
+          estado_pago: 'pendiente',
+        });
+        ventasCreadas++;
+        continue;
+      }
+
+      // Create a venta per item type with unit price derived from total / item count
+      const unitPrice = itemCount > 0 ? fila.total / itemCount : 0;
+
+      if (fila.chips > 0) {
+        await supabase.from('ventas').insert({
+          producto_id: prodChip.id,
+          persona_paga_id: persona.id,
+          cantidad: fila.chips,
+          precio_unitario: unitPrice,
+          total: unitPrice * fila.chips,
+          estado_pago: 'pendiente',
+        });
+        ventasCreadas++;
+      }
+      if (fila.cargadores > 0) {
+        await supabase.from('ventas').insert({
+          producto_id: prodCarg.id,
+          persona_paga_id: persona.id,
+          cantidad: fila.cargadores,
+          precio_unitario: unitPrice,
+          total: unitPrice * fila.cargadores,
+          estado_pago: 'pendiente',
+        });
+        ventasCreadas++;
+      }
+      if (fila.auxiliares > 0) {
+        await supabase.from('ventas').insert({
+          producto_id: prodAux.id,
+          persona_paga_id: persona.id,
+          cantidad: fila.auxiliares,
+          precio_unitario: unitPrice,
+          total: unitPrice * fila.auxiliares,
+          estado_pago: 'pendiente',
+        });
+        ventasCreadas++;
+      }
+    } catch (e: any) {
+      errores.push(`${fila.apodo}: ${e.message}`);
+    }
+  }
+
+  return { personasCreadas, ventasCreadas, errores };
 }

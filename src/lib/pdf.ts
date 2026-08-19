@@ -11,6 +11,11 @@ interface TotalesReporte {
   total: number;
 }
 
+const BRAND_COLOR: [number, number, number] = [27, 111, 255];
+const DARK_COLOR: [number, number, number] = [15, 23, 42];
+const GRAY_COLOR: [number, number, number] = [100, 116, 139];
+const LIGHT_GRAY: [number, number, number] = [241, 245, 249];
+
 export async function generatePDF(
   fechaISO: string,
   porPersona: ResumenPersona[],
@@ -18,31 +23,69 @@ export async function generatePDF(
 ) {
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const pageW = doc.internal.pageSize.getWidth();
-  const margin = 14;
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 16;
 
-  // Header
-  doc.setFontSize(20);
-  doc.setTextColor(15, 23, 42);
-  doc.text('Bitacora — Reporte de Ventas', margin, 20);
+  // ===== HEADER BAR =====
+  doc.setFillColor(...BRAND_COLOR);
+  doc.rect(0, 0, pageW, 32, 'F');
 
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(22);
+  doc.setFont('helvetica', 'bold');
+  doc.text('BITACORA', margin, 15);
   doc.setFontSize(11);
-  doc.setTextColor(100, 116, 139);
-  doc.text(`Fecha: ${fechaLarga(fechaISO)}`, margin, 28);
+  doc.setFont('helvetica', 'normal');
+  doc.text('Reporte de Ventas Diario', margin, 23);
 
-  // Totals summary box
-  doc.setFontSize(10);
-  doc.setTextColor(51, 65, 85);
-  const resumenLine = `Chips: ${totales.chips}  |  Cargadores: ${totales.cargadores}  |  Auxiliares: ${totales.auriculares}  |  Telefonos: ${totales.telefonos}  |  TOTAL: ${moneda(totales.total)}`;
-  doc.text(resumenLine, margin, 36);
+  // Date on right
+  doc.setFontSize(13);
+  doc.setFont('helvetica', 'bold');
+  const fechaStr = fechaLarga(fechaISO);
+  doc.text(fechaStr, pageW - margin, 15, { align: 'right' });
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(200, 220, 255);
+  const hoy = new Date();
+  doc.text(
+    `Generado: ${hoy.toLocaleDateString('es-MX')} ${hoy.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`,
+    pageW - margin, 23, { align: 'right' },
+  );
 
-  // Separator
-  doc.setDrawColor(203, 213, 225);
-  doc.setLineWidth(0.3);
-  doc.line(margin, 40, pageW - margin, 40);
+  // ===== SUMMARY CARDS =====
+  let y = 42;
+  const cardW = (pageW - margin * 2 - 12) / 5;
+  const cards = [
+    { label: 'CHIPS', value: String(totales.chips), color: BRAND_COLOR },
+    { label: 'CARGADORES', value: String(totales.cargadores), color: [100, 116, 139] as [number, number, number] },
+    { label: 'AUXILIARES', value: String(totales.auriculares), color: [100, 116, 139] as [number, number, number] },
+    { label: 'TELEFONOS', value: String(totales.telefonos), color: [100, 116, 139] as [number, number, number] },
+    { label: 'TOTAL', value: moneda(totales.total), color: [16, 185, 129] as [number, number, number] },
+  ];
 
-  // Per-person summary table
+  for (const card of cards) {
+    doc.setFillColor(...LIGHT_GRAY);
+    doc.roundedRect(margin + (cardW + 3) * cards.indexOf(card), y, cardW, 18, 2, 2, 'F');
+    doc.setTextColor(...GRAY_COLOR);
+    doc.setFontSize(7);
+    doc.setFont('helvetica', 'bold');
+    doc.text(card.label, margin + (cardW + 3) * cards.indexOf(card) + 3, y + 6);
+    doc.setTextColor(...card.color);
+    doc.setFontSize(13);
+    doc.text(card.value, margin + (cardW + 3) * cards.indexOf(card) + 3, y + 14);
+  }
+
+  y += 26;
+
+  // ===== SECTION: RESUMEN POR PERSONA =====
+  doc.setTextColor(...DARK_COLOR);
+  doc.setFontSize(12);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Resumen por Persona', margin, y);
+  y += 4;
+
   autoTable(doc, {
-    startY: 44,
+    startY: y,
     head: [['Persona', 'Chips', 'Carg.', 'Aux.', 'Tel.', 'Total']],
     body: porPersona.map((p) => [
       p.apodo,
@@ -54,35 +97,45 @@ export async function generatePDF(
     ]),
     foot: [['TOTAL', String(totales.chips), String(totales.cargadores), String(totales.auriculares), String(totales.telefonos), moneda(totales.total)]],
     theme: 'striped',
-    headStyles: { fillColor: [27, 111, 255], textColor: 255, fontSize: 9 },
-    footStyles: { fillColor: [15, 23, 42], textColor: 255, fontSize: 9, fontStyle: 'bold' },
+    headStyles: { fillColor: BRAND_COLOR, textColor: 255, fontSize: 9, fontStyle: 'bold' },
+    footStyles: { fillColor: DARK_COLOR, textColor: 255, fontSize: 10, fontStyle: 'bold' },
     bodyStyles: { fontSize: 9, textColor: [51, 65, 85] },
     alternateRowStyles: { fillColor: [248, 250, 252] },
     columnStyles: {
-      0: { cellWidth: 40 },
+      0: { cellWidth: 45, fontStyle: 'bold' as const },
       1: { halign: 'center' as const },
       2: { halign: 'center' as const },
       3: { halign: 'center' as const },
       4: { halign: 'center' as const },
-      5: { halign: 'right' as const },
+      5: { halign: 'right' as const, fontStyle: 'bold' as const },
     },
     margin: { left: margin, right: margin },
   });
 
-  // Detail tables per person
-  let y = (doc as any).lastAutoTable.finalY + 8;
+  // ===== SECTION: DETALLE POR PERSONA =====
+  y = (doc as any).lastAutoTable.finalY + 12;
+
+  doc.setTextColor(...DARK_COLOR);
+  doc.setFontSize(12);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Detalle por Persona', margin, y);
+  y += 4;
 
   for (const persona of porPersona) {
-    if (y > 250) {
+    if (y > pageH - 50) {
       doc.addPage();
       y = 20;
     }
 
-    doc.setFontSize(11);
-    doc.setTextColor(15, 23, 42);
+    // Person header bar
+    doc.setFillColor(...BRAND_COLOR);
+    doc.roundedRect(margin, y, pageW - margin * 2, 7, 1, 1, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(10);
     doc.setFont('helvetica', 'bold');
-    doc.text(`${persona.apodo} — ${moneda(persona.total)}`, margin, y);
-    y += 4;
+    doc.text(persona.apodo, margin + 3, y + 5);
+    doc.text(moneda(persona.total), pageW - margin - 3, y + 5, { align: 'right' });
+    y += 9;
 
     const detalleRows = persona.desglose.map((v) => {
       if (v.chip) {
@@ -98,7 +151,7 @@ export async function generatePDF(
       return [
         horaCorta(v.fecha),
         v.producto?.nombre ?? 'Producto',
-        String(v.cantidad),
+        `${v.cantidad} pza`,
         '',
         v.persona_usa?.apodo ?? '—',
         moneda(Number(v.total)),
@@ -107,37 +160,36 @@ export async function generatePDF(
 
     autoTable(doc, {
       startY: y,
-      head: [['Hora', 'Producto', 'Numero', 'Ult4', 'Usa', 'Total']],
+      head: [['Hora', 'Producto', 'Detalle', 'Ult4', 'Usa', 'Total']],
       body: detalleRows,
       theme: 'grid',
-      headStyles: { fillColor: [241, 245, 249], textColor: [51, 65, 85], fontSize: 8 },
+      headStyles: { fillColor: LIGHT_GRAY, textColor: [71, 85, 105], fontSize: 8, fontStyle: 'bold' },
       bodyStyles: { fontSize: 8, textColor: [71, 85, 105] },
+      alternateRowStyles: { fillColor: [252, 253, 255] },
       columnStyles: {
         0: { cellWidth: 18 },
-        5: { halign: 'right' as const },
+        1: { cellWidth: 30 },
+        5: { halign: 'right' as const, fontStyle: 'bold' as const },
       },
       margin: { left: margin, right: margin },
     });
 
-    y = (doc as any).lastAutoTable.finalY + 8;
+    y = (doc as any).lastAutoTable.finalY + 6;
   }
 
-  // Footer
+  // ===== FOOTER =====
   const pageCount = doc.getNumberOfPages();
   for (let i = 1; i <= pageCount; i++) {
     doc.setPage(i);
+    // Footer line
+    doc.setDrawColor(...LIGHT_GRAY);
+    doc.setLineWidth(0.3);
+    doc.line(margin, pageH - 12, pageW - margin, pageH - 12);
     doc.setFontSize(8);
-    doc.setTextColor(148, 163, 184);
-    doc.text(
-      `Generado el ${new Date().toLocaleDateString('es-MX')} a las ${new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`,
-      margin,
-      doc.internal.pageSize.getHeight() - 8,
-    );
-    doc.text(
-      `Pagina ${i} de ${pageCount}`,
-      pageW - margin - 20,
-      doc.internal.pageSize.getHeight() - 8,
-    );
+    doc.setTextColor(...GRAY_COLOR);
+    doc.setFont('helvetica', 'normal');
+    doc.text('Bitacora - Gestion de Chips', margin, pageH - 7);
+    doc.text(`Pagina ${i} de ${pageCount}`, pageW - margin, pageH - 7, { align: 'right' });
   }
 
   const filename = `reporte_${fechaISO}.pdf`;
