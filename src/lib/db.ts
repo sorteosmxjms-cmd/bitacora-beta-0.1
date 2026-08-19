@@ -4,6 +4,21 @@ import type {
   Compania, EstadoChip, EstadoPago,
 } from './types';
 
+/**
+ * Supabase may return the chip relation as an array (to-many) or object (to-one).
+ * Normalize to a single object or null so the rest of the app can use `chip.numero`.
+ */
+function normalizeChip<T extends { chip?: Chip | Chip[] | null }>(venta: T): T {
+  if (Array.isArray(venta.chip)) {
+    return { ...venta, chip: venta.chip[0] ?? null };
+  }
+  return venta;
+}
+
+function normalizeVentas<T extends { chip?: Chip | Chip[] | null }>(ventas: T[]): T[] {
+  return ventas.map(normalizeChip);
+}
+
 /* ---------------- Personas ---------------- */
 
 export async function getPersonas(): Promise<Persona[]> {
@@ -51,6 +66,11 @@ export async function actualizarPersona(id: string, patch: Partial<Pick<Persona,
     .from('personas').update(patch).eq('id', id).select().single();
   if (error) throw error;
   return data as Persona;
+}
+
+export async function eliminarPersona(id: string): Promise<void> {
+  const { error } = await supabase.from('personas').delete().eq('id', id);
+  if (error) throw error;
 }
 
 /* ---------------- Productos ---------------- */
@@ -147,7 +167,7 @@ export async function getVentasDetalle(): Promise<VentaDetalle[]> {
     `)
     .order('fecha', { ascending: false });
   if (error) throw error;
-  return data as unknown as VentaDetalle[];
+  return normalizeVentas(data as unknown as VentaDetalle[]);
 }
 
 export async function getVentasDePersona(personaId: string): Promise<VentaDetalle[]> {
@@ -163,7 +183,7 @@ export async function getVentasDePersona(personaId: string): Promise<VentaDetall
     .eq('persona_paga_id', personaId)
     .order('fecha', { ascending: false });
   if (error) throw error;
-  return data as unknown as VentaDetalle[];
+  return normalizeVentas(data as unknown as VentaDetalle[]);
 }
 
 export async function buscarChips(params: {
@@ -198,7 +218,7 @@ export async function buscarChips(params: {
 
   const { data, error } = await q.order('fecha', { ascending: false });
   if (error) throw error;
-  return (data as unknown as VentaDetalle[]).filter((v) => v.chip);
+  return normalizeVentas((data as unknown as VentaDetalle[])).filter((v) => v.chip);
 }
 
 export async function setEstadoChip(chipId: string, estado: EstadoChip): Promise<Chip> {
@@ -239,7 +259,42 @@ export async function getVentasHoy(): Promise<VentaDetalle[]> {
     .lt('fecha', end)
     .order('fecha', { ascending: false });
   if (error) throw error;
-  return data as unknown as VentaDetalle[];
+  return normalizeVentas(data as unknown as VentaDetalle[]);
+}
+
+export async function getVentasPorFecha(fechaISO: string): Promise<VentaDetalle[]> {
+  // fechaISO = 'YYYY-MM-DD' (local date string). Query that calendar day.
+  const [y, m, d] = fechaISO.split('-').map(Number);
+  const start = new Date(y, m - 1, d).toISOString();
+  const end = new Date(y, m - 1, d + 1).toISOString();
+  const { data, error } = await supabase
+    .from('ventas')
+    .select(`
+      *,
+      producto:productos(*),
+      persona_usa:personas!ventas_persona_usa_id_fkey(*),
+      persona_paga:personas!ventas_persona_paga_id_fkey(*),
+      chip:chips(*)
+    `)
+    .gte('fecha', start)
+    .lt('fecha', end)
+    .order('fecha', { ascending: false });
+  if (error) throw error;
+  return normalizeVentas(data as unknown as VentaDetalle[]);
+}
+
+export async function getDiasConVentas(): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('ventas')
+    .select('fecha')
+    .order('fecha', { ascending: false });
+  if (error) throw error;
+  const dias = new Set<string>();
+  for (const row of data as { fecha: string }[]) {
+    const d = new Date(row.fecha);
+    dias.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+  }
+  return Array.from(dias).sort().reverse();
 }
 
 /* ---------------- Pagos / Saldos ---------------- */

@@ -6,6 +6,7 @@ import { DeudasPage } from '@/pages/DeudasPage';
 import { PersonasPage } from '@/pages/PersonasPage';
 import { ProductosPage } from '@/pages/ProductosPage';
 import { HistorialPage } from '@/pages/HistorialPage';
+import { ReportesPage } from '@/pages/ReportesPage';
 import { getSaldos } from '@/lib/db';
 
 function Shell() {
@@ -39,6 +40,7 @@ function Shell() {
         {section === 'personas' && <PersonasPage />}
         {section === 'productos' && <ProductosPage />}
         {section === 'historial' && <HistorialPage />}
+        {section === 'reportes' && <ReportesPage />}
       </main>
     </div>
   );

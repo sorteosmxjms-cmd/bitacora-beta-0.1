@@ -1,11 +1,11 @@
 import { useMemo, useState } from 'react';
-import { Users, Plus, Search, Pencil, Power, Check, X, UploadCloud, AlertCircle } from 'lucide-react';
+import { Users, Plus, Search, Pencil, Power, Check, X, CloudUpload as UploadCloud, CircleAlert as AlertCircle, Trash2 } from 'lucide-react';
 import { useApp } from '@/store/AppContext';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { Badge } from '@/components/ui/Badge';
-import { crearPersona, actualizarPersona, crearPersonasBatch } from '@/lib/db';
+import { crearPersona, actualizarPersona, eliminarPersona, crearPersonasBatch } from '@/lib/db';
 import { fechaCorta } from '@/lib/format';
 import type { Persona } from '@/lib/types';
 
@@ -21,6 +21,7 @@ export function PersonasPage() {
   const [importResult, setImportResult] = useState<{ creadas: number; duplicadas: string[] } | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<Persona | null>(null);
 
   const importPreview = useMemo(() => {
     const lines = importText.split(/[\n,;]+/).map((l) => l.trim().toUpperCase()).filter(Boolean);
@@ -81,6 +82,21 @@ export function PersonasPage() {
       await refreshPersonas();
     } catch (e: any) {
       setError(e.message);
+    }
+  };
+
+  const confirmarEliminar = async () => {
+    if (!confirmDelete) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await eliminarPersona(confirmDelete.id);
+      await refreshPersonas();
+      setConfirmDelete(null);
+    } catch (e: any) {
+      setError(e.message || 'No se pudo eliminar. Puede tener ventas o pagos asociados.');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -179,6 +195,13 @@ export function PersonasPage() {
                 >
                   <Power size={15} />
                 </button>
+                <button
+                  onClick={() => { setConfirmDelete(p); setError(null); }}
+                  className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-ink-800 transition"
+                  title="Eliminar"
+                >
+                  <Trash2 size={15} />
+                </button>
               </div>
             ))}
           </div>
@@ -223,6 +246,23 @@ export function PersonasPage() {
             <Button variant="subtle" onClick={() => setEditando(null)}><X size={16} /> Cancelar</Button>
             <Button onClick={handleSaveEdit} disabled={saving || !nuevoApodo.trim()}>
               <Check size={16} /> {saving ? 'Guardando…' : 'Guardar'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Delete confirmation modal */}
+      <Modal open={!!confirmDelete} onClose={() => setConfirmDelete(null)} title="¿Eliminar persona?" size="sm">
+        <div className="space-y-3">
+          <p className="text-sm text-slate-400">
+            Se eliminará a <span className="font-semibold text-slate-200 uppercase">{confirmDelete?.apodo}</span> permanentemente.
+            <br />Si tiene ventas o pagos asociados, esos registros se conservarán pero quedarán sin persona asignada.
+          </p>
+          {error && <p className="text-xs text-rose-400">{error}</p>}
+          <div className="flex gap-2 justify-end">
+            <Button variant="subtle" onClick={() => setConfirmDelete(null)}>Cancelar</Button>
+            <Button variant="danger" onClick={confirmarEliminar} disabled={saving}>
+              <Trash2 size={16} /> {saving ? 'Eliminando…' : 'Sí, eliminar'}
             </Button>
           </div>
         </div>

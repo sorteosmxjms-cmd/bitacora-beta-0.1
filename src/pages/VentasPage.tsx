@@ -294,21 +294,22 @@ export function VentasPage() {
     }
   };
 
-  // --- Per-person chip count summary for today ---
-  const chipsPorPersona = useMemo(() => {
-    const map = new Map<string, { apodo: string; chips: number; cargadores: number; auriculares: number; total: number }>();
+  // --- Per-person product breakdown for today ---
+  const resumenPorPersona = useMemo(() => {
+    const map = new Map<string, { apodo: string; chips: number; cargadores: number; auriculares: number; telefonos: number; total: number }>();
     for (const v of hoyVentas) {
       const pid = v.persona_paga?.id;
       if (!pid) continue;
       const apodo = v.persona_paga?.apodo ?? '?';
-      const entry = map.get(pid) ?? { apodo, chips: 0, cargadores: 0, auriculares: 0, total: 0 };
+      const entry = map.get(pid) ?? { apodo, chips: 0, cargadores: 0, auriculares: 0, telefonos: 0, total: 0 };
       if (v.chip) entry.chips++;
-      if (v.producto?.nombre === 'Cargador') entry.cargadores += v.cantidad;
-      if (v.producto?.nombre === 'Auriculares') entry.auriculares += v.cantidad;
+      if (v.producto?.categoria === 'accesorio' && v.producto?.nombre === 'Cargador') entry.cargadores += v.cantidad;
+      if (v.producto?.categoria === 'accesorio' && v.producto?.nombre === 'Auriculares') entry.auriculares += v.cantidad;
+      if (v.producto?.categoria === 'telefono') entry.telefonos += v.cantidad;
       entry.total += Number(v.total);
       map.set(pid, entry);
     }
-    return Array.from(map.values()).sort((a, b) => b.chips - a.chips);
+    return Array.from(map.values()).sort((a, b) => b.total - a.total);
   }, [hoyVentas]);
 
   return (
@@ -571,25 +572,40 @@ export function VentasPage() {
         </span>
       </div>
 
-      {/* Per-person chip summary */}
-      {chipsPorPersona.length > 0 && (
+      {/* Per-person summary */}
+      {resumenPorPersona.length > 0 && (
         <div className="mt-6">
           <h3 className="text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
             <Clock size={15} className="text-brand-400" />
             Resumen del día por persona
           </h3>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-            {chipsPorPersona.map((p) => (
-              <div key={p.apodo} className="card p-3">
-                <p className="text-sm font-semibold text-slate-100 uppercase tracking-wide truncate">{p.apodo}</p>
-                <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
-                  {p.chips > 0 && <span className="text-brand-300">{p.chips} chip{p.chips !== 1 ? 's' : ''}</span>}
-                  {p.cargadores > 0 && <span className="text-slate-400">{p.cargadores} cargador{p.cargadores !== 1 ? 'es' : ''}</span>}
-                  {p.auriculares > 0 && <span className="text-slate-400">{p.auriculares} aux{p.auriculares !== 1 ? 'es' : ''}</span>}
+          <div className="card overflow-hidden">
+            <div className="grid grid-cols-12 gap-2 px-4 py-2.5 bg-ink-850/60 border-b border-ink-700/40 text-xs font-semibold uppercase tracking-wider text-slate-500">
+              <div className="col-span-3">Persona</div>
+              <div className="col-span-1 text-center">Chips</div>
+              <div className="col-span-2 text-center">Carg.</div>
+              <div className="col-span-2 text-center">Aux.</div>
+              <div className="col-span-2 text-center">Tel.</div>
+              <div className="col-span-2 text-right">Total</div>
+            </div>
+            <div className="divide-y divide-ink-700/40">
+              {resumenPorPersona.map((p) => (
+                <div key={p.apodo} className="grid grid-cols-12 gap-2 px-4 py-2.5 items-center hover:bg-ink-850/40 transition">
+                  <div className="col-span-3 font-medium uppercase tracking-wide text-slate-100 truncate">{p.apodo}</div>
+                  <div className="col-span-1 text-center font-mono text-brand-300">{p.chips || '—'}</div>
+                  <div className="col-span-2 text-center font-mono text-slate-400">{p.cargadores || '—'}</div>
+                  <div className="col-span-2 text-center font-mono text-slate-400">{p.auriculares || '—'}</div>
+                  <div className="col-span-2 text-center font-mono text-slate-400">{p.telefonos || '—'}</div>
+                  <div className="col-span-2 text-right font-mono font-semibold text-mint-300">{moneda(p.total)}</div>
                 </div>
-                <p className="mt-1 text-xs font-mono text-mint-300">{moneda(p.total)}</p>
+              ))}
+            </div>
+            <div className="grid grid-cols-12 gap-2 px-4 py-2.5 bg-ink-850/60 border-t border-ink-700/40 items-center">
+              <div className="col-span-9 text-xs font-semibold uppercase tracking-wider text-slate-500">Total del día</div>
+              <div className="col-span-3 text-right font-mono font-bold text-mint-300">
+                {moneda(resumenPorPersona.reduce((a, p) => a + p.total, 0))}
               </div>
-            ))}
+            </div>
           </div>
         </div>
       )}

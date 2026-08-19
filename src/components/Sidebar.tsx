@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { ShoppingCart, Wallet, Users, Package, History, CircuitBoard, type LucideIcon } from 'lucide-react';
+import { ShoppingCart, Wallet, Users, Package, History, CircuitBoard, FileText, type LucideIcon } from 'lucide-react';
 
-export type SectionKey = 'ventas' | 'deudas' | 'personas' | 'productos' | 'historial';
+export type SectionKey = 'ventas' | 'deudas' | 'personas' | 'productos' | 'historial' | 'reportes';
 
 interface NavItem {
   key: SectionKey;
@@ -11,6 +11,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { key: 'ventas', label: 'Ventas', icon: ShoppingCart },
+  { key: 'reportes', label: 'Reportes', icon: FileText },
   { key: 'deudas', label: 'Deudas', icon: Wallet },
   { key: 'personas', label: 'Personas', icon: Users },
   { key: 'productos', label: 'Productos', icon: Package },
