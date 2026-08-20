@@ -1,7 +1,7 @@
 import { supabase } from './supabase';
 import type {
   Persona, Producto, Venta, Chip, Pago, VentaDetalle, SaldoPersona,
-  Compania, EstadoChip, EstadoPago, CategoriaProducto,
+  Compania, EstadoChip, EstadoPago, CategoriaProducto, LoteImportacion,
 } from './types';
 
 /**
@@ -249,6 +249,14 @@ export async function actualizarVentaPersona(
   if (error) throw error;
 }
 
+export async function actualizarVenta(
+  ventaId: string,
+  patch: { persona_paga_id?: string | null; cantidad?: number; precio_unitario?: number; total?: number; nota?: string | null },
+): Promise<void> {
+  const { error } = await supabase.from('ventas').update(patch).eq('id', ventaId);
+  if (error) throw error;
+}
+
 export async function getVentasHoy(): Promise<VentaDetalle[]> {
   const now = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
@@ -342,114 +350,209 @@ export function calcularEstadoPago(totalVenta: number, totalPagos: number): Esta
   return 'abonado';
 }
 
-/* ---------------- Importación masiva de deudas ---------------- */
+/* ---------------- Pagos / Abonos: editar y eliminar ---------------- */
 
-export interface FilaDeudaImport {
-  apodo: string;
-  chips: number;
-  auxiliares: number;
-  cargadores: number;
-  total: number;
+export async function actualizarPago(
+  pagoId: string,
+  patch: { cantidad?: number; nota?: string | null; fecha?: string },
+): Promise<void> {
+  const { error } = await supabase.from('pagos').update(patch).eq('id', pagoId);
+  if (error) throw error;
 }
 
-/**
- * Import debts from a pasted Excel-like text. For each row:
- * - Create the persona if it doesn't exist.
- * - Create placeholder productos (Chip importado, Cargador importado, Auriculares importado) if needed.
- * - Create a venta per item with the appropriate quantity and unit price derived from the total.
- * - Create a single "venta de saldo inicial" that represents the remaining debt.
- * The total is treated as the outstanding balance (deuda), not total vendido.
- */
-export async function importarDeudas(filas: FilaDeudaImport[]): Promise<{
+export async function eliminarPago(pagoId: string): Promise<void> {
+  const { error } = await supabase.from('pagos').delete().eq('id', pagoId);
+  if (error) throw error;
+}
+
+/* ---------------- Lotes de importación ---------------- */
+
+export async function getLotes(): Promise<LoteImportacion[]> {
+  const { data, error } = await supabase
+    .from('lotes_importacion').select('*').order('fecha', { ascending: false });
+  if (error) throw error;
+  return (data as LoteImportacion[]).map((l) => ({
+    ...l,
+    total_importado: Number(l.total_importado),
+  }));
+}
+
+export async function getVentasDeLote(loteId: string): Promise<VentaDetalle[]> {
+  const { data, error } = await supabase
+    .from('ventas')
+    .select(`
+      *,
+      producto:productos(*),
+      persona_usa:personas!ventas_persona_usa_id_fkey(*),
+      persona_paga:personas!ventas_persona_paga_id_fkey(*),
+      chip:chips(*)
+    `)
+    .eq('lote_id', loteId)
+    .order('fecha', { ascending: false });
+  if (error) throw error;
+  return normalizeVentas(data as unknown as VentaDetalle[]);
+}
+
+export async function eliminarLote(loteId: string): Promise<{ eliminadas: number }> {
+  // Delete all ventas with this lote_id, then delete the lote itself
+  const { data: deleted, error: delErr } = await supabase
+    .from('ventas').delete().eq('lote_id', loteId).select('id');
+  if (delErr) throw delErr;
+  const eliminadas = (deleted as { id: string }[])?.length ?? 0;
+
+  const { error: loteErr } = await supabase
+    .from('lotes_importacion').delete().eq('id', loteId);
+  if (loteErr) throw loteErr;
+
+  return { eliminadas };
+}
+
+/* ---------------- Importación masiva de deudas (nuevo sistema) ---------------- */
+
+/** A single mapped column from the pasted Excel data */
+export type TipoColumna =
+  | 'persona' | 'chip_telcel' | 'chip_att' | 'chip_unefon'
+  | 'chip_precio55' | 'chip_precio110' | 'cargador' | 'auricular'
+  | 'telefono_basico' | 'telefono_android' | 'total' | 'otro' | 'ignorar';
+
+export interface ColumnaMapeada {
+  indice: number;
+  tipo: TipoColumna;
+  precioHistorico?: number;
+}
+
+export interface FilaImportacion {
+  apodo: string;
+  items: { tipo: TipoColumna; cantidad: number; precioUnitario: number }[];
+  total: number;
+  personaExistente: Persona | null;
+  esNueva: boolean;
+  tieneAdvertencia: boolean;
+  notaAdvertencia: string;
+}
+
+export interface ResultadoImportacion {
+  loteId: string;
   personasCreadas: number;
   ventasCreadas: number;
   errores: string[];
-}> {
+}
+
+/** Normalize apodo for comparison: uppercase, trim, collapse double spaces */
+export function normalizarApodo(apodo: string): string {
+  return apodo.trim().toUpperCase().replace(/\s+/g, ' ');
+}
+
+/** Find an existing persona by normalized apodo (sync, array lookup) */
+export function buscarPersonaPorApodo(apodo: string, personas: Persona[]): Persona | null {
+  const norm = normalizarApodo(apodo);
+  return personas.find((p) => normalizarApodo(p.apodo) === norm) ?? null;
+}
+
+/** Create a persona if not found, return existing or new */
+export async function ensurePersona(apodo: string, personas: Persona[]): Promise<{ persona: Persona; creada: boolean }> {
+  const existing = await buscarPersonaPorApodo(apodo, personas);
+  if (existing) return { persona: existing, creada: false };
+  const persona = await crearPersona(apodo);
+  return { persona, creada: true };
+}
+
+/** Ensure a producto exists for historical import items */
+async function ensureProductoHistorico(
+  nombre: string,
+  categoria: CategoriaProducto,
+  prodMap: Map<string, Producto>,
+): Promise<Producto> {
+  if (prodMap.has(nombre)) return prodMap.get(nombre)!;
+  const created = await crearProducto(nombre, categoria, 0);
+  prodMap.set(nombre, created);
+  return created;
+}
+
+/**
+ * Execute a full import with a lote_id for tracking and undo.
+ * Each FilaImportacion gets one or more ventas with origen='historica'.
+ */
+export async function ejecutarImportacion(
+  filas: FilaImportacion[],
+  personasActuales: Persona[],
+  notaLote?: string,
+): Promise<ResultadoImportacion> {
   let personasCreadas = 0;
   let ventasCreadas = 0;
   const errores: string[] = [];
 
-  // Ensure placeholder products exist
+  // Load all productos for caching
   const { data: prods } = await supabase.from('productos').select('*');
   const prodMap = new Map<string, Producto>();
   for (const p of (prods as Producto[]) ?? []) {
     prodMap.set(p.nombre, p);
   }
 
-  const ensureProducto = async (nombre: string, categoria: CategoriaProducto): Promise<Producto> => {
-    if (prodMap.has(nombre)) return prodMap.get(nombre)!;
-    const created = await crearProducto(nombre, categoria, 0);
-    prodMap.set(nombre, created);
-    return created;
-  };
+  // Create the lote
+  const totalImportado = filas.reduce((a, f) => a + f.total, 0);
+  const { data: loteData, error: loteErr } = await supabase
+    .from('lotes_importacion')
+    .insert({ registros: filas.length, total_importado: totalImportado, nota: notaLote?.trim() || null })
+    .select().single();
+  if (loteErr) throw loteErr;
+  const loteId = (loteData as LoteImportacion).id;
 
-  const prodChip = await ensureProducto('Chip (importado)', 'chip');
-  const prodCarg = await ensureProducto('Cargador (importado)', 'accesorio');
-  const prodAux = await ensureProducto('Auriculares (importado)', 'accesorio');
+  // Build persona cache from current list + any we create
+  const personasCache = [...personasActuales];
 
   for (const fila of filas) {
     try {
-      const apodo = fila.apodo.trim().toUpperCase();
-      if (!apodo) continue;
-
-      // Find or create persona
-      const { data: existing } = await supabase
-        .from('personas').select('*').eq('apodo', apodo).maybeSingle();
-      let persona = existing as Persona | null;
-      if (!persona) {
-        persona = await crearPersona(apodo);
-        personasCreadas++;
+      const apodo = fila.apodo.trim();
+      if (!apodo) {
+        errores.push('Fila sin apodo');
+        continue;
       }
 
-      const itemCount = fila.chips + fila.cargadores + fila.auxiliares;
-      if (itemCount === 0 && fila.total > 0) {
-        // No items but has debt — create a single saldoInicial venta
-        await supabase.from('ventas').insert({
-          producto_id: prodChip.id,
+      // Find or create persona
+      const { persona, creada } = await ensurePersona(apodo, personasCache);
+      if (creada) {
+        personasCreadas++;
+        personasCache.push(persona);
+      }
+
+      if (fila.items.length === 0 && fila.total > 0) {
+        // No item breakdown — create a single manual debt entry
+        const prodManual = await ensureProductoHistorico('Deuda histórica (manual)', 'accesorio', prodMap);
+        const { error } = await supabase.from('ventas').insert({
+          producto_id: prodManual.id,
           persona_paga_id: persona.id,
           cantidad: 1,
           precio_unitario: fila.total,
           total: fila.total,
           estado_pago: 'pendiente',
+          origen: 'historica',
+          lote_id: loteId,
+          nota: 'Deuda histórica importada',
         });
+        if (error) throw error;
         ventasCreadas++;
         continue;
       }
 
-      // Create a venta per item type with unit price derived from total / item count
-      const unitPrice = itemCount > 0 ? fila.total / itemCount : 0;
+      // Create one venta per item type
+      for (const item of fila.items) {
+        if (item.cantidad <= 0) continue;
+        const prodNombre = productoNombreParaTipo(item.tipo);
+        const prodCat = productoCategoriaParaTipo(item.tipo);
+        const prod = await ensureProductoHistorico(prodNombre, prodCat, prodMap);
 
-      if (fila.chips > 0) {
-        await supabase.from('ventas').insert({
-          producto_id: prodChip.id,
+        const { error } = await supabase.from('ventas').insert({
+          producto_id: prod.id,
           persona_paga_id: persona.id,
-          cantidad: fila.chips,
-          precio_unitario: unitPrice,
-          total: unitPrice * fila.chips,
+          cantidad: item.cantidad,
+          precio_unitario: item.precioUnitario,
+          total: item.precioUnitario * item.cantidad,
           estado_pago: 'pendiente',
+          origen: 'historica',
+          lote_id: loteId,
         });
-        ventasCreadas++;
-      }
-      if (fila.cargadores > 0) {
-        await supabase.from('ventas').insert({
-          producto_id: prodCarg.id,
-          persona_paga_id: persona.id,
-          cantidad: fila.cargadores,
-          precio_unitario: unitPrice,
-          total: unitPrice * fila.cargadores,
-          estado_pago: 'pendiente',
-        });
-        ventasCreadas++;
-      }
-      if (fila.auxiliares > 0) {
-        await supabase.from('ventas').insert({
-          producto_id: prodAux.id,
-          persona_paga_id: persona.id,
-          cantidad: fila.auxiliares,
-          precio_unitario: unitPrice,
-          total: unitPrice * fila.auxiliares,
-          estado_pago: 'pendiente',
-        });
+        if (error) throw error;
         ventasCreadas++;
       }
     } catch (e: any) {
@@ -457,5 +560,62 @@ export async function importarDeudas(filas: FilaDeudaImport[]): Promise<{
     }
   }
 
-  return { personasCreadas, ventasCreadas, errores };
+  return { loteId, personasCreadas, ventasCreadas, errores };
+}
+
+function productoNombreParaTipo(tipo: TipoColumna): string {
+  switch (tipo) {
+    case 'chip_telcel': return 'Chip Telcel (histórico)';
+    case 'chip_att': return 'Chip AT&T (histórico)';
+    case 'chip_unefon': return 'Chip Unefon (histórico)';
+    case 'chip_precio55': return 'Chip $55 (histórico)';
+    case 'chip_precio110': return 'Chip $110 (histórico)';
+    case 'cargador': return 'Cargador (histórico)';
+    case 'auricular': return 'Auricular (histórico)';
+    case 'telefono_basico': return 'Teléfono básico (histórico)';
+    case 'telefono_android': return 'Teléfono Android (histórico)';
+    case 'otro': return 'Otro (histórico)';
+    default: return 'Deuda histórica (manual)';
+  }
+}
+
+function productoCategoriaParaTipo(tipo: TipoColumna): CategoriaProducto {
+  if (tipo.startsWith('chip')) return 'chip';
+  if (tipo.startsWith('telefono')) return 'telefono';
+  return 'accesorio';
+}
+
+/** Create a single manual historical debt for one person */
+export async function crearDeudaManual(
+  personaId: string,
+  total: number,
+  nota: string,
+): Promise<void> {
+  // Get or create the manual debt producto
+  const { data: prods } = await supabase.from('productos').select('*').eq('nombre', 'Deuda histórica (manual)');
+  let prodId: string;
+  if (prods && prods.length > 0) {
+    prodId = (prods[0] as Producto).id;
+  } else {
+    const p = await crearProducto('Deuda histórica (manual)', 'accesorio', 0);
+    prodId = p.id;
+  }
+
+  const { error } = await supabase.from('ventas').insert({
+    producto_id: prodId,
+    persona_paga_id: personaId,
+    cantidad: 1,
+    precio_unitario: total,
+    total,
+    estado_pago: 'pendiente',
+    origen: 'historica',
+    nota: nota.trim() || null,
+  });
+  if (error) throw error;
+}
+
+/** Delete a single historical debt (venta) and its related chips */
+export async function eliminarDeuda(ventaId: string): Promise<void> {
+  const { error } = await supabase.from('ventas').delete().eq('id', ventaId);
+  if (error) throw error;
 }

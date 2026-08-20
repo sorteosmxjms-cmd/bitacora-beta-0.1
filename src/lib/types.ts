@@ -2,6 +2,7 @@ export type Compania = 'telcel' | 'att' | 'unefon';
 export type EstadoChip = 'en_uso' | 'baja';
 export type EstadoPago = 'pendiente' | 'abonado' | 'liquidado';
 export type CategoriaProducto = 'chip' | 'accesorio' | 'telefono';
+export type OrigenVenta = 'venta' | 'historica';
 
 export interface Persona {
   id: string;
@@ -29,6 +30,9 @@ export interface Venta {
   precio_unitario: number;
   total: number;
   estado_pago: EstadoPago;
+  origen: OrigenVenta;
+  nota: string | null;
+  lote_id: string | null;
 }
 
 export interface Chip {
@@ -63,4 +67,12 @@ export interface SaldoPersona {
   total_vendido: number;
   total_abonado: number;
   saldo: number;
+}
+
+export interface LoteImportacion {
+  id: string;
+  fecha: string;
+  registros: number;
+  total_importado: number;
+  nota: string | null;
 }
