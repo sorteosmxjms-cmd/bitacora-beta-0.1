@@ -1,9 +1,5 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
-import {
-  Wallet, Plus, TrendingDown, CircleCheck as CheckCircle2, Clock, Check,
-  UploadCloud, Search, Pencil, Trash2, ArrowLeft, History, AlertTriangle,
-  CircleAlert as AlertCircle, FileDown, ArrowRight, ArrowLeft as ArrowLeftIcon,
-} from 'lucide-react';
+import { Wallet, Plus, TrendingDown, CircleCheck as CheckCircle2, Clock, Check, CloudUpload as UploadCloud, Search, Pencil, Trash2, ArrowLeft, History, TriangleAlert as AlertTriangle, CircleAlert as AlertCircle, FileDown, ArrowRight, ArrowLeft as ArrowLeftIcon } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
@@ -11,16 +7,18 @@ import { Badge } from '@/components/ui/Badge';
 import { PersonAutocomplete } from '@/components/PersonAutocomplete';
 import { useApp } from '@/store/AppContext';
 import {
-  getSaldos, getPagosDePersona, getVentasDePersona, registrarPago, calcularEstadoPago,
+  getSaldos, getPagosDePersona, getVentasDePersona, getVentasDetalle, registrarPago, calcularEstadoPago,
   actualizarPago, eliminarPago, actualizarVenta, eliminarDeuda, crearDeudaManual,
   getLotes, getVentasDeLote, eliminarLote,
-  type FilaImportacion, type TipoColumna,
+  getVentasHistoricas, getVentasHistoricasSinLote, eliminarVentasBatch,
+  shortLabelParaTipo,
 } from '@/lib/db';
 import {
   moneda, fechaCorta, horaCorta, companiaLabel, companiaColor,
   estadoPagoLabel, estadoPagoColor,
 } from '@/lib/format';
 import type { SaldoPersona, Pago, VentaDetalle, LoteImportacion, Persona } from '@/lib/types';
+import { Settings2, Layers } from 'lucide-react';
 import { ImportWizard } from './ImportWizard';
 
 export function DeudasPage() {
@@ -57,6 +55,17 @@ export function DeudasPage() {
   const [confirmDeleteVenta, setConfirmDeleteVenta] = useState<VentaDetalle | null>(null);
   const [confirmDeleteAbono, setConfirmDeleteAbono] = useState<Pago | null>(null);
 
+  // Admin data modal
+  const [showAdmin, setShowAdmin] = useState(false);
+  const [adminTab, setAdminTab] = useState<'importaciones' | 'historicos' | 'prueba'>('importaciones');
+  const [allVentasHistoricas, setAllVentasHistoricas] = useState<VentaDetalle[]>([]);
+  const [selectedVentas, setSelectedVentas] = useState<Set<string>>(new Set());
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [adminLoading, setAdminLoading] = useState(false);
+
+  // All ventas for DETALLE column summaries
+  const [allVentas, setAllVentas] = useState<VentaDetalle[]>([]);
+
   // Import wizard
   const [showImport, setShowImport] = useState(false);
 
@@ -91,6 +100,16 @@ export function DeudasPage() {
 
   useEffect(() => { cargarSaldos(); }, [cargarSaldos]);
 
+  // Load all ventas for DETALLE column summaries
+  useEffect(() => {
+    (async () => {
+      try {
+        const v = await getVentasDetalle();
+        setAllVentas(v);
+      } catch { /* ignore */ }
+    })();
+  }, [saldos]);
+
   const cargarDetalle = useCallback(async (personaId: string) => {
     const [pg, vt] = await Promise.all([getPagosDePersona(personaId), getVentasDePersona(personaId)]);
     setPagos(pg);
@@ -111,6 +130,40 @@ export function DeudasPage() {
     return saldos.filter((s) => s.apodo.toLowerCase().includes(q));
   }, [saldos, searchQuery]);
 
+  // Per-person summary for DETALLE column
+  const resumenPorPersona = useMemo(() => {
+    const map = new Map<string, { label: string; cantidad: number; precio: number; origen: string }[]>();
+    for (const v of allVentas) {
+      const pid = v.persona_paga_id;
+      if (!pid) continue;
+      const nombre = v.producto?.nombre ?? 'Producto';
+      const precio = Number(v.precio_unitario);
+      const key = `${nombre}|${precio}|${v.origen}`;
+      const grupos = map.get(pid) ?? [];
+      const existing = grupos.find((g) => `${g.label}|${g.precio}|${g.origen}` === key);
+      if (existing) {
+        existing.cantidad += v.cantidad;
+      } else {
+        grupos.push({ label: nombre, cantidad: v.cantidad, precio, origen: v.origen });
+      }
+      map.set(pid, grupos);
+    }
+    return map;
+  }, [allVentas]);
+
+  function shortDetalle(personaId: string): string {
+    const grupos = resumenPorPersona.get(personaId);
+    if (!grupos || grupos.length === 0) return '';
+    const sorted = [...grupos].sort((a, b) => b.cantidad * b.precio - a.cantidad * a.precio);
+    const first = sorted[0];
+    const parts = sorted.slice(0, 2).map((g) =>
+      `${g.cantidad} ${g.label.replace(' (histórico)', '').replace(' (importado)', '')}`
+    );
+    let text = parts.join(' · ');
+    if (sorted.length > 2) text += ` · +${sorted.length - 2} más`;
+    return text;
+  }
+
   // ===== Abono handlers =====
   const abrirAbono = (s: SaldoPersona) => {
     setDetalle(s);
@@ -128,7 +181,7 @@ export function DeudasPage() {
     setSaving(true);
     setError(null);
     try {
-      await registrarPago(detalle.persona_id, cant, abonoNota);
+      await registrarPago(detalle.persona_id, cant, abonoNota, abonoFecha);
       await cargarSaldos();
       const s = await getSaldos();
       const updated = s.find((x) => x.persona_id === detalle.persona_id);
@@ -279,6 +332,51 @@ export function DeudasPage() {
     }
   };
 
+  // ===== Admin data handlers =====
+  const cargarVentasHistoricas = async () => {
+    setAdminLoading(true);
+    try {
+      const v = await getVentasHistoricas();
+      setAllVentasHistoricas(v);
+    } catch { /* ignore */ }
+    setAdminLoading(false);
+  };
+
+  const toggleSeleccion = (id: string) => {
+    setSelectedVentas((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSeleccionarTodos = () => {
+    if (selectedVentas.size === allVentasHistoricas.length) {
+      setSelectedVentas(new Set());
+    } else {
+      setSelectedVentas(new Set(allVentasHistoricas.map((v) => v.id)));
+    }
+  };
+
+  const eliminarBulkConfirm = async () => {
+    setSaving(true);
+    try {
+      await eliminarVentasBatch(Array.from(selectedVentas));
+      await cargarSaldos();
+      setSelectedVentas(new Set());
+      setConfirmBulkDelete(false);
+      await cargarVentasHistoricas();
+      const v = await getVentasDetalle();
+      setAllVentas(v);
+      showToast('ok', `${selectedVentas.size} cargo(s) eliminado(s)`);
+    } catch (e: any) {
+      showToast('err', e.message || 'Error al eliminar.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   // ===== Import handler (called from wizard) =====
   const handleImportComplete = async () => {
     setShowImport(false);
@@ -354,6 +452,9 @@ export function DeudasPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="subtle" size="sm" onClick={() => { setShowAdmin(true); cargarVentasHistoricas(); cargarLotes(); }}>
+            <Settings2 size={14} /> Administrar datos
+          </Button>
           <Button variant="subtle" size="sm" onClick={() => { setShowHistorial(true); cargarLotes(); }}>
             <History size={14} /> Historial
           </Button>
@@ -416,7 +517,6 @@ export function DeudasPage() {
           </div>
           <div className="divide-y divide-ink-700/40">
             {saldosFiltrados.map((s) => {
-              const cantVentas = ventas.length;
               return (
                 <div
                   key={s.persona_id}
@@ -427,8 +527,8 @@ export function DeudasPage() {
                     <span className="font-medium uppercase tracking-wide text-slate-100">{s.apodo}</span>
                     {s.saldo <= 0 && <Badge className="bg-mint-500/15 text-mint-300 border-mint-500/30"><Check size={11} /> Liquidado</Badge>}
                   </div>
-                  <div className="col-span-2 text-xs text-slate-500">
-                    {cantVentas > 0 ? `${cantVentas} cargo${cantVentas !== 1 ? 's' : ''}` : '—'}
+                  <div className="col-span-2 text-xs text-slate-500 truncate">
+                    {shortDetalle(s.persona_id) || '—'}
                   </div>
                   <div className="col-span-2 text-right font-mono text-slate-400">{moneda(s.total_vendido)}</div>
                   <div className="col-span-2 text-right font-mono text-brand-300">{moneda(s.total_abonado)}</div>
@@ -752,6 +852,154 @@ export function DeudasPage() {
             </div>
           </div>
         )}
+      </Modal>
+
+      {/* ===== ADMIN DATA MODAL ===== */}
+      <Modal open={showAdmin} onClose={() => setShowAdmin(false)} title="Administrar datos" size="lg">
+        <div className="space-y-3">
+          {/* Tabs */}
+          <div className="flex gap-1 border-b border-ink-700/40 pb-2">
+            <button
+              onClick={() => setAdminTab('importaciones')}
+              className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${adminTab === 'importaciones' ? 'bg-brand-600/20 text-brand-300' : 'text-slate-500 hover:bg-ink-800'}`}
+            >Importaciones</button>
+            <button
+              onClick={() => setAdminTab('historicos')}
+              className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${adminTab === 'historicos' ? 'bg-brand-600/20 text-brand-300' : 'text-slate-500 hover:bg-ink-800'}`}
+            >Cargos históricos</button>
+            <button
+              onClick={() => setAdminTab('prueba')}
+              className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${adminTab === 'prueba' ? 'bg-rose-600/20 text-rose-300' : 'text-slate-500 hover:bg-ink-800'}`}
+            >Datos de prueba</button>
+          </div>
+
+          {/* Tab: Importaciones */}
+          {adminTab === 'importaciones' && (
+            <div className="space-y-2">
+              {lotes.length === 0 ? (
+                <p className="text-sm text-slate-500 text-center py-4">No hay importaciones con lote. Los cargos de la importación anterior aparecen en "Cargos históricos".</p>
+              ) : (
+                <div className="rounded-lg border border-ink-700/40 divide-y divide-ink-700/30">
+                  {lotes.map((l) => (
+                    <div key={l.id} className="px-3 py-2.5 flex items-center gap-3 text-xs">
+                      <span className="text-slate-500 font-mono w-28 shrink-0">{fechaCorta(l.fecha)} {horaCorta(l.fecha)}</span>
+                      <span className="text-slate-400">{l.registros} registros</span>
+                      <span className="font-mono text-slate-300">{moneda(Number(l.total_importado))}</span>
+                      <div className="ml-auto flex gap-1">
+                        <Button size="sm" variant="subtle" onClick={() => { setShowHistorial(true); setShowAdmin(false); verLoteDetalle(l); }}>Ver</Button>
+                        <Button size="sm" variant="danger" onClick={() => setConfirmDeleteLote(l)}>
+                          <Trash2 size={11} /> Deshacer
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Tab: Cargos históricos */}
+          {adminTab === 'historicos' && (
+            <div className="space-y-2">
+              {adminLoading ? (
+                <p className="text-sm text-slate-500 text-center py-4">Cargando…</p>
+              ) : allVentasHistoricas.length === 0 ? (
+                <p className="text-sm text-slate-500 text-center py-4">No hay cargos históricos.</p>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between mb-2">
+                    <button
+                      onClick={toggleSeleccionarTodos}
+                      className="text-xs text-brand-400 hover:text-brand-300"
+                    >
+                      {selectedVentas.size === allVentasHistoricas.length ? 'Deseleccionar todo' : `Seleccionar todo (${allVentasHistoricas.length})`}
+                    </button>
+                    {selectedVentas.size > 0 && (
+                      <Button size="sm" variant="danger" onClick={() => setConfirmBulkDelete(true)}>
+                        <Trash2 size={12} /> Eliminar seleccionados ({selectedVentas.size})
+                      </Button>
+                    )}
+                  </div>
+                  <div className="max-h-72 overflow-y-auto rounded-lg border border-ink-700/40 divide-y divide-ink-700/30">
+                    {allVentasHistoricas.map((v) => (
+                      <label key={v.id} className="px-3 py-2 flex items-center gap-2 text-xs hover:bg-ink-850/40 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedVentas.has(v.id)}
+                          onChange={() => toggleSeleccion(v.id)}
+                          className="w-3.5 h-3.5 rounded accent-brand-500"
+                        />
+                        <span className="font-medium uppercase text-slate-200 w-20 shrink-0 truncate">{v.persona_paga?.apodo ?? '—'}</span>
+                        <span className="text-slate-400 flex-1 truncate">{v.cantidad} × {v.producto?.nombre}</span>
+                        <span className="font-mono text-slate-500 text-[10px]">@{moneda(Number(v.precio_unitario))}</span>
+                        <span className="font-mono text-slate-300">{moneda(Number(v.total))}</span>
+                        {!v.lote_id && <Badge className="bg-rose-500/10 text-rose-400/80 border-rose-500/20 text-[8px]">sin lote</Badge>}
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-slate-600">Total: {allVentasHistoricas.length} cargos · {moneda(allVentasHistoricas.reduce((a, v) => a + Number(v.total), 0))}</p>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Tab: Datos de prueba */}
+          {adminTab === 'prueba' && (
+            <div className="space-y-3">
+              <div className="card-soft p-3 text-sm text-slate-400">
+                <p className="font-semibold text-amber-400 mb-1 flex items-center gap-1.5">
+                  <AlertTriangle size={14} /> Limpiar datos de prueba / importaciones anteriores
+                </p>
+                <p className="text-xs mb-2">
+                  Los cargos actuales sin lote ({allVentasHistoricas.filter((v) => !v.lote_id).length} registros)
+                  provienen de la importación incorrecta anterior (productos "(importado)" con precios inventados).
+                </p>
+                <p className="text-xs text-slate-500 mb-2">Al eliminar:</p>
+                <ul className="text-xs text-slate-500 space-y-0.5 mb-3">
+                  <li>✓ Se eliminan los cargos/deudas incorrectos</li>
+                  <li>✗ NO se eliminan las personas del catálogo</li>
+                  <li>✗ NO se eliminan ventas reales (con chip)</li>
+                  <li>✗ NO se eliminan abonos</li>
+                </ul>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={() => {
+                    const sinLote = allVentasHistoricas.filter((v) => !v.lote_id);
+                    setSelectedVentas(new Set(sinLote.map((v) => v.id)));
+                    setConfirmBulkDelete(true);
+                  }}
+                  disabled={allVentasHistoricas.filter((v) => !v.lote_id).length === 0}
+                >
+                  <Trash2 size={14} /> Seleccionar todos los cargos sin lote ({allVentasHistoricas.filter((v) => !v.lote_id).length})
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      </Modal>
+
+      {/* ===== CONFIRM BULK DELETE ===== */}
+      <Modal open={confirmBulkDelete} onClose={() => setConfirmBulkDelete(false)} title="Confirmar eliminación" size="sm">
+        <div className="space-y-3">
+          <div className="flex items-start gap-2 text-amber-400 text-sm">
+            <AlertTriangle size={18} className="shrink-0 mt-0.5" />
+            <div>
+              <p>Se eliminarán:</p>
+              <ul className="text-slate-300 mt-1 ml-3 text-xs space-y-0.5">
+                <li>{selectedVentas.size} cargo(s) seleccionado(s)</li>
+                <li>Total: {moneda(allVentasHistoricas.filter((v) => selectedVentas.has(v.id)).reduce((a, v) => a + Number(v.total), 0))}</li>
+              </ul>
+              <p className="mt-2 text-slate-500">NO se eliminarán: personas, ventas reales, chips, abonos.</p>
+            </div>
+          </div>
+          <div className="flex gap-2 justify-end">
+            <Button variant="subtle" onClick={() => setConfirmBulkDelete(false)}>Cancelar</Button>
+            <Button variant="danger" onClick={eliminarBulkConfirm} disabled={saving}>
+              <Trash2 size={16} /> {saving ? 'Eliminando…' : 'Sí, eliminar'}
+            </Button>
+          </div>
+        </div>
       </Modal>
 
       {/* ===== IMPORT WIZARD ===== */}
